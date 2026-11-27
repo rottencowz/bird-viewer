@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Birds of the Trip - Serengeti 2026</title>
+  <link rel="stylesheet" href="gallery.css">
+</head>
+<body>
+  <header class="hero">
+    <h1>Birds of the Trip</h1>
+    <p>Serengeti, September 2026 &middot; in the order we saw them. Click a bird for details and links.</p>
+  </header>
+
+  <div class="toolbar"><div class="row">
+    <label class="toggle"><input id="notesOnly" type="checkbox"> Has notes</label>
+    <label class="toggle"><input id="ref" type="checkbox" checked autocomplete="off"> Show reference photos</label>
+    <span class="count" id="count"></span>
+  </div></div>
+
+  <main>
+    <div class="grid" id="grid"></div>
+    <p class="empty" id="empty" hidden>No birds match.</p>
+  </main>
+
+  <dialog id="dlg">
+    <div class="pic" id="pic">
+      <div class="strip" id="strip"></div>
+      <button class="arrow left" id="photoPrev" aria-label="Previous photo">&lsaquo;</button>
+      <button class="arrow right" id="photoNext" aria-label="Next photo">&rsaquo;</button>
+      <div class="dots" id="dots"></div>
+    </div>
+    <div class="cap" id="dCap"></div>
+    <div class="body">
+      <h2 id="dName"></h2>
+      <div class="sci" id="dSci"></div>
+      <div id="dFam"></div>
+      <p id="dNote"></p>
+      <div class="links" id="dLinks"></div>
+    </div>
+    <div class="nav">
+      <button id="prev">&larr; Prev</button>
+      <button id="close">Close</button>
+      <button id="next">Next &rarr;</button>
+    </div>
+  </dialog>
+
+  <script src="data.js"></script>
+  <script src="common.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const state = { list: [], index: 0, ref: $("ref").checked };  // reference photos on by default
+
+    // Birds stay in the order they appear in data.js (the order we saw them).
+    const filtered = () => BIRDS.filter(b => !$("notesOnly").checked || b.note);
+
+    function paintCard(el, bird, ref) {
+      const im = imageFor(bird, state.ref, ref);
+      el.querySelector(".img").style.backgroundImage = `url("${im.src}")`;
+      el.querySelector(".badge").textContent = im.kind === "own" ? "" : im.kind === "ref" ? "Reference" : "Photo soon";
+      el.querySelector(".badge").hidden = im.kind === "own";
+      el.dataset.kind = im.kind;
+    }
+
+    function render() {
+      state.list = filtered();
+      $("count").textContent = `${state.list.length} of ${BIRDS.length}`;
+      $("empty").hidden = state.list.length > 0;
+      $("grid").innerHTML = state.list.map((b, i) => `
+        <button class="card" data-id="${b.id}" data-i="${i}">
+          <div class="img"><span class="badge"></span>${b.note ? '<span class="note-dot" title="Has notes">&#9998;</span>' : ""}</div>
+          <div class="meta"><b>${esc(b.name)}</b><i>${esc(b.sci)}</i></div>
+        </button>`).join("");
+      document.querySelectorAll(".card").forEach(el => {
+        const b = BIRDS.find(x => x.id === +el.dataset.id);
+        paintCard(el, b, refCache[b.sci]);
+      });
+      if (state.ref) lazyReferencePhotos(".card", (el, b, ref) => paintCard(el, b, ref));
+    }
+
+    // ---- Photo carousel in the detail dialog (swipe, arrows, or dots) ----
+    let slides = [];
+    function setSlides(list, alt) {
+      slides = list;
+      $("strip").innerHTML = list.map((s, n) =>
+        `<img src="${esc(s.src)}" alt="${esc(alt)}" ${n ? 'loading="lazy"' : ""}>`).join("");
+      $("strip").scrollLeft = 0;
+      $("dots").innerHTML = list.length > 1
+        ? list.map((_, n) => `<button data-n="${n}" aria-label="Photo ${n + 1} of ${list.length}"></button>`).join("") : "";
+      $("pic").classList.toggle("multi", list.length > 1);
+      syncSlide();
+    }
+    function syncSlide() {
+      const strip = $("strip");
+      const n = Math.min(slides.length - 1, Math.round(strip.scrollLeft / (strip.clientWidth || 1)));
+      $("dCap").textContent = (slides.length > 1 ? `${n + 1} / ${slides.length} \u00b7 ` : "") + (slides[n]?.label || "");
+      [...$("dots").children].forEach((d, k) => d.classList.toggle("on", k === n));
+    }
+    const goSlide = n => $("strip").scrollTo({ left: n * $("strip").clientWidth, behavior: "smooth" });
+    const slideNow = () => Math.round($("strip").scrollLeft / ($("strip").clientWidth || 1));
+
+    async function show(i) {
+      state.index = (i + state.list.length) % state.list.length;
+      const b = state.list[state.index];
+      const token = state.token = (state.token || 0) + 1;
+      $("dName").textContent = b.name;
+      $("dSci").textContent = b.sci;
+      $("dFam").innerHTML = `<b>Family:</b> ${esc(b.family)}${b.seen ? " &middot; <b>Seen:</b> " + esc(b.seen) : ""}`;
+      $("dNote").textContent = b.note || "No notes yet.";
+      $("dLinks").innerHTML = birdLinks(b);
+
+      // Our own photo always comes first; reference photos follow when the toggle is on.
+      const own = b.photo ? [{ src: b.photo, label: b.credit || "" }] : [];
+      const refSlides = list => list.map(p => ({ src: p.url, label: "Reference photo, not ours. " + p.credit }));
+      const known = state.ref ? (galleryCache[b.sci] || (refCache[b.sci] ? [refCache[b.sci]] : [])) : [];
+      const start = own.concat(refSlides(known));
+      setSlides(start.length ? start : [{ src: placeholder(b), label: "Photo coming soon" }], b.name);
+      if (!$("dlg").open) $("dlg").showModal();
+
+      // Dialog is already open; fetch the full set in the background and swap it in.
+      if (state.ref && !galleryCache[b.sci]) {
+        const gallery = await fetchReferenceGallery(b);
+        if (token === state.token && gallery.length) setSlides(own.concat(refSlides(gallery)), b.name);
+      }
+    }
+
+    $("grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) show(+c.dataset.i); });
+    $("notesOnly").addEventListener("input", render);
+    $("ref").addEventListener("change", e => { state.ref = e.target.checked; render(); });
+    $("strip").addEventListener("scroll", syncSlide, { passive: true });
+    $("photoPrev").onclick = () => goSlide(Math.max(0, slideNow() - 1));
+    $("photoNext").onclick = () => goSlide(Math.min(slides.length - 1, slideNow() + 1));
+    $("dots").addEventListener("click", e => { const d = e.target.closest("button"); if (d) goSlide(+d.dataset.n); });
+    $("prev").onclick = () => show(state.index - 1);
+    $("next").onclick = () => show(state.index + 1);
+    $("close").onclick = () => $("dlg").close();
+    $("dlg").addEventListener("click", e => { if (e.target === $("dlg")) $("dlg").close(); });
+    document.addEventListener("keydown", e => {
+      if (!$("dlg").open) return;
+      if (e.key === "ArrowLeft") show(state.index - 1);
+      if (e.key === "ArrowRight") show(state.index + 1);
+    });
+    render();
+  </script>
+</body>
+</html>
